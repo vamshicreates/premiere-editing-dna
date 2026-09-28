@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Cross-Platform Controller for Adobe Premiere Pro (`scripts/premiere_cli.py`).
+Cross-Platform Live Foreground Controller for Adobe Premiere Pro (`scripts/premiere_cli.py`).
 
-Combines two reliable bridges across macOS and Windows:
-1. Live CEP HTTP-to-ExtendScript Bridge (`http://127.0.0.1:8088`) auto-started by our
-   bundled `com.vamshicreates.premieremcp` CEP extension.
-2. Direct Premiere Pro Sequence XML (`xmeml v4`) launcher (`open -a` on macOS /
-   `Adobe Premiere Pro.exe` on Windows) so complete multi-track timelines open in
-   Premiere Pro even if the CEP panel hasn't been initialized yet.
+Brings Premiere Pro to the foreground on both macOS and Windows so the user watches
+every clip placement, cut, playhead scrub, zoom effect, audio ducking adjustment,
+and marker happen live inside the Premiere Pro timeline.
 """
 
 import argparse
@@ -18,6 +15,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -80,6 +78,46 @@ def call_cep_bridge(endpoint: str, method: str = "GET", payload: dict = None, ti
         return None
 
 
+def bring_premiere_to_front(auto_open_bridge_menu: bool = True):
+    """Bring Adobe Premiere Pro to the foreground on macOS or Windows and auto-open the CEP bridge panel if needed."""
+    system = platform.system()
+    ppro_bin = find_premiere_executable()
+
+    if system == "Darwin":
+        if ppro_bin:
+            subprocess.run(["open", "-a", ppro_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if auto_open_bridge_menu and call_cep_bridge("/ping", "GET", timeout=1.5) is None:
+            # Attempt to click Window > Extensions > Antigravity Premiere Bridge via System Events
+            osa = """
+            tell application "System Events"
+                set pList to every process whose name contains "Premiere"
+                if (count of pList) > 0 then
+                    set pProc to item 1 of pList
+                    set frontmost of pProc to true
+                    try
+                        click menu item "Antigravity Premiere Bridge" of menu 1 of menu item "Extensions" of menu 1 of menu bar item "Window" of menu bar 1 of pProc
+                    end try
+                end if
+            end tell
+            """
+            subprocess.run(["osascript", "-e", osa], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            time.sleep(1.0)
+
+    elif system == "Windows":
+        ps_cmd = (
+            "$wshell = New-Object -ComObject WScript.Shell; "
+            "[void]$wshell.AppActivate('Adobe Premiere Pro'); "
+            "[void]$wshell.AppActivate('Premiere Pro')"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+
+
 def cmd_status() -> dict:
     ppro_bin = find_premiere_executable()
     cep_ping = call_cep_bridge("/ping", "GET", timeout=3.0)
@@ -93,6 +131,7 @@ def cmd_status() -> dict:
 
 
 def cmd_inspect_sequence() -> dict:
+    bring_premiere_to_front(auto_open_bridge_menu=True)
     res = call_cep_bridge("/inspect-sequence", "GET", timeout=20.0)
     if res:
         return res
@@ -107,13 +146,13 @@ def cmd_import_into_premiere(file_paths: list[str]) -> dict:
     if not abs_paths:
         return {"status": "error", "message": "No valid existing files provided to import."}
 
-    # Try live CEP bridge first
+    bring_premiere_to_front(auto_open_bridge_menu=True)
+
     res = call_cep_bridge("/import", "POST", {"paths": abs_paths}, timeout=30.0)
     if res and res.get("status") in ("success", "partial"):
         res["method"] = "live_cep_import"
         return res
 
-    # Fallback: Open XML / project file directly with Premiere Pro executable
     ppro_bin = find_premiere_executable()
     if ppro_bin:
         primary = abs_paths[0]
@@ -121,8 +160,6 @@ def cmd_import_into_premiere(file_paths: list[str]) -> dict:
         try:
             if system == "Darwin":
                 subprocess.Popen(["open", "-a", ppro_bin, primary])
-            elif system == "Windows":
-                subprocess.Popen([ppro_bin, primary])
             else:
                 subprocess.Popen([ppro_bin, primary])
             return {
@@ -142,6 +179,7 @@ def cmd_import_into_premiere(file_paths: list[str]) -> dict:
 
 
 def cmd_eval_jsx(code: str) -> dict:
+    bring_premiere_to_front(auto_open_bridge_menu=True)
     res = call_cep_bridge("/eval", "POST", {"code": code}, timeout=30.0)
     if res:
         return res
@@ -152,7 +190,7 @@ def cmd_eval_jsx(code: str) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cross-platform Adobe Premiere Pro CLI controller")
+    parser = argparse.ArgumentParser(description="Cross-platform Adobe Premiere Pro Live Foreground CLI controller")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="Check Premiere Pro installation and live CEP bridge status")
@@ -161,7 +199,7 @@ def main():
     p_imp = sub.add_parser("import", help="Import FCP7 XML sequence or media files into Premiere Pro")
     p_imp.add_argument("files", nargs="+", help="Paths to .xml, .srt, or media files")
 
-    p_eval = sub.add_parser("eval", help="Execute ExtendScript code inside Premiere Pro via CEP bridge")
+    p_eval = sub.add_parser("eval", help="Execute ExtendScript code live inside Premiere Pro via CEP bridge")
     p_eval.add_argument("-c", "--code", help="Inline ExtendScript code")
     p_eval.add_argument("-f", "--file", help="Path to .jsx file")
 

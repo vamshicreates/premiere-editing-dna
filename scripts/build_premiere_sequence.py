@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Multi-Track Premiere Pro Sequence & SRT Compiler (`scripts/build_premiere_sequence.py`).
+Multi-Track Premiere Pro Live Foreground Builder & XML/SRT Compiler (`scripts/build_premiere_sequence.py`).
 
-1. `auto-cut`: Scans raw A-Roll footage using `ffmpeg silencedetect` to remove dead air
-   and produces a ready-to-build `timeline_spec.json` tailored to the editor's Editing DNA
-   (ASL pacing, alternating punch-in zooms, B-roll slots, SFX cues, and BGM ducking).
-2. `build`: Compiles `timeline_spec.json` into a native Premiere Pro multi-track
-   `xmeml version="4"` XML sequence (`V1` A-Roll, `V2` B-Roll, `V3` Overlays, `A1` Dialogue,
-   `A2` SFX, `A3` Music Bed, Sequence Markers, Motion Scale filters, Audio Gain filters)
-   plus a synchronized `.srt` caption file, and imports it directly into Premiere Pro.
+How it works so the user watches the edit happen live inside Premiere Pro (macOS & Windows):
+1. Brings Adobe Premiere Pro to the foreground (`bring_premiere_to_front`).
+2. When the live CEP Bridge (`127.0.0.1:8088`) is online, executes **Live Step-by-Step Timeline Assembly**:
+   - Creates organized Project Bins (`01_A_Roll`, `02_B_Roll`, `03_Audio_SFX_BGM`, `04_Graphics`)
+   - Places each `V1`/`A1` cut one-by-one onto the active sequence, moving the playhead to each cut
+     and applying `Motion -> Scale` (`112%` punch-in zoom) in real time so the user sees every cut
+     and zoom happen live in the Timeline and Program Monitor!
+   - Places `V2` B-Roll, `V3` Overlays, `A2` SFX, `A3` Ducked Music Bed, and Sequence Markers step-by-step!
+3. Also writes the complete FCP7 `xmeml version="4"` `.xml` sequence and `.srt` captions to disk
+   (and imports them automatically if the CEP bridge wasn't open yet).
 """
 
 import argparse
@@ -19,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -27,7 +31,7 @@ from xml.dom import minidom
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from premiere_cli import cmd_import_into_premiere  # noqa: E402
+from premiere_cli import bring_premiere_to_front, call_cep_bridge, cmd_import_into_premiere  # noqa: E402
 
 
 def path_to_premiere_url(file_path: str) -> str:
@@ -35,7 +39,6 @@ def path_to_premiere_url(file_path: str) -> str:
     p = Path(file_path).resolve()
     posix = p.as_posix()
     if not posix.startswith("/"):
-        # Windows drive path e.g. C:/Users/...
         posix = "/" + posix
     encoded = urllib.parse.quote(posix, safe="/:")
     return f"file://localhost{encoded}"
@@ -125,6 +128,178 @@ def detect_speech_segments(
         speech.append({"name": Path(video_path).stem, "path": abs_path, "inSec": 0.0, "outSec": total_dur, "scale": 100.0})
 
     return speech
+
+
+def execute_live_step_by_step_in_premiere(spec: dict, step_delay_sec: float = 0.20) -> dict | None:
+    """
+    If the live CEP bridge (`127.0.0.1:8088`) is online, build the sequence
+    clip-by-clip and track-by-track in the foreground so the user watches every cut,
+    zoom, B-roll placement, audio ducking, and marker happen live on screen!
+    """
+    bring_premiere_to_front(auto_open_bridge_menu=True)
+    ping = call_cep_bridge("/ping", "GET", timeout=2.5)
+    if not ping or ping.get("status") != "success":
+        return None
+
+    seq_cfg = spec.get("sequence", {})
+    seq_name = seq_cfg.get("name", "Live_AI_Edit")
+    width = int(seq_cfg.get("width", 1080))
+    height = int(seq_cfg.get("height", 1920))
+
+    live_steps_executed = []
+    cursor_sec = 0.0
+
+    # 1. Place V1 + A1 A-Roll Cuts step-by-step
+    for idx, item in enumerate(spec.get("v1_aroll", [])):
+        in_sec = float(item.get("inSec", 0.0))
+        out_sec = float(item.get("outSec", in_sec + 3.0))
+        dur_sec = max(0.1, out_sec - in_sec)
+        start_sec = float(item["startSec"]) if "startSec" in item else cursor_sec
+        cursor_sec = max(cursor_sec, round(start_sec + dur_sec, 3))
+
+        res = call_cep_bridge(
+            "/place-clip",
+            "POST",
+            {
+                "sequenceName": seq_name,
+                "width": width,
+                "height": height,
+                "binName": "01_A_Roll",
+                "trackType": "video",
+                "trackIndex": 0,
+                "name": item.get("name") or f"A_Roll_{idx+1}",
+                "path": str(Path(item["path"]).resolve()),
+                "inSec": in_sec,
+                "outSec": out_sec,
+                "startSec": start_sec,
+                "scale": float(item.get("scale", 100.0)),
+                "gainDb": float(item.get("gainDb", 0.0)),
+            },
+            timeout=25.0,
+        )
+        live_steps_executed.append({"step": f"V1_Cut_{idx+1}", "response": res})
+        time.sleep(step_delay_sec)
+
+    # 2. Place V2 B-Roll Cutaways step-by-step
+    for idx, item in enumerate(spec.get("v2_broll", [])):
+        in_sec = float(item.get("inSec", 0.0))
+        dur_sec = float(item.get("durationSec") or (float(item.get("outSec", 2.5)) - in_sec))
+        out_sec = in_sec + dur_sec
+        start_sec = float(item.get("startSec", 0.0))
+
+        res = call_cep_bridge(
+            "/place-clip",
+            "POST",
+            {
+                "binName": "02_B_Roll",
+                "trackType": "video",
+                "trackIndex": 1,
+                "name": item.get("name") or f"B_Roll_{idx+1}",
+                "path": str(Path(item["path"]).resolve()),
+                "inSec": in_sec,
+                "outSec": out_sec,
+                "startSec": start_sec,
+                "scale": float(item.get("scale", 100.0)),
+            },
+            timeout=25.0,
+        )
+        live_steps_executed.append({"step": f"V2_BRoll_{idx+1}", "response": res})
+        time.sleep(step_delay_sec)
+
+    # 3. Place V3 Overlays / Graphics step-by-step
+    for idx, item in enumerate(spec.get("v3_overlays", [])):
+        dur_sec = float(item.get("durationSec", 3.0))
+        start_sec = float(item.get("startSec", 0.0))
+        res = call_cep_bridge(
+            "/place-clip",
+            "POST",
+            {
+                "binName": "04_Graphics",
+                "trackType": "video",
+                "trackIndex": 2,
+                "name": item.get("name") or f"Overlay_{idx+1}",
+                "path": str(Path(item["path"]).resolve()),
+                "inSec": 0.0,
+                "outSec": dur_sec,
+                "startSec": start_sec,
+                "scale": float(item.get("scale", 100.0)),
+            },
+            timeout=25.0,
+        )
+        live_steps_executed.append({"step": f"V3_Overlay_{idx+1}", "response": res})
+        time.sleep(step_delay_sec)
+
+    # 4. Place A2 SFX step-by-step
+    for idx, item in enumerate(spec.get("a2_sfx", [])):
+        dur_sec = float(item.get("durationSec", 1.2))
+        start_sec = float(item.get("startSec", 0.0))
+        res = call_cep_bridge(
+            "/place-clip",
+            "POST",
+            {
+                "binName": "03_Audio_SFX_BGM",
+                "trackType": "audio",
+                "trackIndex": 1,
+                "name": item.get("name") or f"SFX_{idx+1}",
+                "path": str(Path(item["path"]).resolve()),
+                "inSec": 0.0,
+                "outSec": dur_sec,
+                "startSec": start_sec,
+                "gainDb": float(item.get("gainDb", -9.0)),
+            },
+            timeout=25.0,
+        )
+        live_steps_executed.append({"step": f"A2_SFX_{idx+1}", "response": res})
+        time.sleep(step_delay_sec)
+
+    # 5. Place A3 Ducked Music Bed
+    for idx, item in enumerate(spec.get("a3_bgm", [])):
+        start_sec = float(item.get("startSec", 0.0))
+        in_sec = float(item.get("inSec", 0.0))
+        end_sec = float(item.get("endSec", max(cursor_sec, 15.0)))
+        out_sec = in_sec + max(1.0, end_sec - start_sec)
+        res = call_cep_bridge(
+            "/place-clip",
+            "POST",
+            {
+                "binName": "03_Audio_SFX_BGM",
+                "trackType": "audio",
+                "trackIndex": 2,
+                "name": item.get("name") or f"BGM_{idx+1}",
+                "path": str(Path(item["path"]).resolve()),
+                "inSec": in_sec,
+                "outSec": out_sec,
+                "startSec": start_sec,
+                "gainDb": float(item.get("gainDb", -20.0)),
+            },
+            timeout=25.0,
+        )
+        live_steps_executed.append({"step": f"A3_BGM_{idx+1}", "response": res})
+        time.sleep(step_delay_sec)
+
+    # 6. Add Sequence Markers step-by-step
+    for idx, m in enumerate(spec.get("markers", [])):
+        res = call_cep_bridge(
+            "/add-marker",
+            "POST",
+            {
+                "name": m.get("name", f"Marker_{idx+1}"),
+                "comment": m.get("comment", ""),
+                "timeSec": float(m.get("timeSec", 0.0)),
+                "colorIndex": idx % 6,
+            },
+            timeout=10.0,
+        )
+        live_steps_executed.append({"step": f"Marker_{idx+1}", "response": res})
+        time.sleep(0.12)
+
+    # Return playhead to 00:00:00:00 ready for playback
+    call_cep_bridge("/set-playhead", "POST", {"timeSec": 0.0}, timeout=5.0)
+    return {
+        "mode": "live_foreground_step_by_step",
+        "stepsExecuted": len(live_steps_executed),
+        "details": live_steps_executed,
+    }
 
 
 def add_rate_node(parent: ET.Element, timebase: int, ntsc: bool = False):
@@ -246,7 +421,6 @@ def build_sequence_xml(spec: dict) -> dict:
         else:
             ET.SubElement(clip_el, "file", id=file_registry[abs_p])
 
-    # V1 + A1: Primary A-Roll Track
     v1_track = ET.SubElement(video, "track")
     a1_track = ET.SubElement(audio, "track")
     timeline_cursor_frames = 0
@@ -261,7 +435,6 @@ def build_sequence_xml(spec: dict) -> dict:
         timeline_cursor_frames = max(timeline_cursor_frames, end_f)
 
         cname = item.get("name") or Path(item["path"]).stem
-        # Video ClipItem on V1
         v_ci = ET.SubElement(v1_track, "clipitem", id=f"clipitem-v1-{clip_counter}")
         ET.SubElement(v_ci, "name").text = cname
         ET.SubElement(v_ci, "enabled").text = "TRUE"
@@ -274,7 +447,6 @@ def build_sequence_xml(spec: dict) -> dict:
         attach_file_node(v_ci, item["path"], out_f + 300, has_audio=True)
         add_scale_filter(v_ci, float(item.get("scale", 100.0)))
 
-        # Linked Audio ClipItem on A1
         if item.get("includeAudio", True):
             a_ci = ET.SubElement(a1_track, "clipitem", id=f"clipitem-a1-{clip_counter}")
             ET.SubElement(a_ci, "name").text = cname
@@ -288,7 +460,6 @@ def build_sequence_xml(spec: dict) -> dict:
             attach_file_node(a_ci, item["path"], out_f + 300, has_audio=True)
             add_audio_gain_filter(a_ci, float(item.get("gainDb", 0.0)))
 
-    # V2: B-Roll & Cutaways Track
     v2_track = ET.SubElement(video, "track")
     for item in spec.get("v2_broll", []):
         clip_counter += 1
@@ -312,7 +483,6 @@ def build_sequence_xml(spec: dict) -> dict:
         attach_file_node(v_ci, item["path"], out_f + 300, has_audio=False)
         add_scale_filter(v_ci, float(item.get("scale", 100.0)))
 
-    # V3: Graphics / Overlays Track
     v3_track = ET.SubElement(video, "track")
     for item in spec.get("v3_overlays", []):
         clip_counter += 1
@@ -332,7 +502,6 @@ def build_sequence_xml(spec: dict) -> dict:
         attach_file_node(v_ci, item["path"], dur_f + 300, has_audio=False)
         add_scale_filter(v_ci, float(item.get("scale", 100.0)))
 
-    # A2: SFX Track
     a2_track = ET.SubElement(audio, "track")
     for item in spec.get("a2_sfx", []):
         clip_counter += 1
@@ -352,7 +521,6 @@ def build_sequence_xml(spec: dict) -> dict:
         attach_file_node(a_ci, item["path"], dur_f + 100, has_audio=True)
         add_audio_gain_filter(a_ci, float(item.get("gainDb", -9.0)))
 
-    # A3: BGM / Music Bed Track (auto-trimmed to total sequence length & ducked)
     a3_track = ET.SubElement(audio, "track")
     for item in spec.get("a3_bgm", []):
         clip_counter += 1
@@ -376,7 +544,6 @@ def build_sequence_xml(spec: dict) -> dict:
 
     ET.SubElement(sequence, "duration").text = str(max(timeline_cursor_frames, timebase))
 
-    # Sequence Markers
     for m in spec.get("markers", []):
         m_el = ET.SubElement(sequence, "marker")
         ET.SubElement(m_el, "name").text = str(m.get("name", "Beat"))
@@ -387,7 +554,6 @@ def build_sequence_xml(spec: dict) -> dict:
 
     xml_bytes = ET.tostring(xmeml, encoding="utf-8")
     pretty_xml = minidom.parseString(xml_bytes).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-    # Prepend DOCTYPE for FCP7 XML compatibility in Premiere Pro
     lines = pretty_xml.splitlines()
     if lines and lines[0].startswith("<?xml"):
         lines.insert(1, "<!DOCTYPE xmeml>")
@@ -413,7 +579,7 @@ def build_sequence_xml(spec: dict) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build multi-track Premiere Pro sequences from Editing DNA & specs")
+    parser = argparse.ArgumentParser(description="Build multi-track Premiere Pro sequences live in the foreground")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_cut = sub.add_parser("auto-cut", help="Detect active speech cuts from a raw A-roll video via ffmpeg silencedetect")
@@ -422,9 +588,9 @@ def main():
     p_cut.add_argument("--min-silence", type=float, default=0.30, help="Minimum silence duration to cut (default: 0.30s)")
     p_cut.add_argument("--zoom-scale", type=float, default=112.0, help="Alternating punch-in scale % (default: 112)")
 
-    p_bld = sub.add_parser("build", help="Compile a declarative timeline_spec.json into a Premiere Pro XML + SRT and import it")
+    p_bld = sub.add_parser("build", help="Build a multi-track timeline live on screen in Premiere Pro (+ save XML & SRT)")
     p_bld.add_argument("spec_json", help="Path to timeline_spec.json")
-    p_bld.add_argument("--open", action="store_true", help="Automatically import/open the generated sequence in Premiere Pro")
+    p_bld.add_argument("--open", action="store_true", help="Execute live in Premiere Pro (or auto-open XML if CEP panel is closed)")
 
     args = parser.parse_args()
 
@@ -440,11 +606,17 @@ def main():
     elif args.cmd == "build":
         spec = json.loads(Path(args.spec_json).read_text(encoding="utf-8"))
         res = build_sequence_xml(spec)
-        if args.open and res.get("outputXml"):
-            files_to_import = [res["outputXml"]]
-            if res.get("outputSrt"):
-                files_to_import.append(res["outputSrt"])
-            res["premiere_import"] = cmd_import_into_premiere(files_to_import)
+        if args.open:
+            live_res = execute_live_step_by_step_in_premiere(spec)
+            if live_res:
+                res["live_execution"] = live_res
+                if res.get("outputSrt"):
+                    call_cep_bridge("/import", "POST", {"paths": [res["outputSrt"]]}, timeout=15.0)
+            elif res.get("outputXml"):
+                files_to_import = [res["outputXml"]]
+                if res.get("outputSrt"):
+                    files_to_import.append(res["outputSrt"])
+                res["premiere_import"] = cmd_import_into_premiere(files_to_import)
         print(json.dumps(res, indent=2))
 
 

@@ -14,8 +14,12 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from build_premiere_sequence import build_sequence_xml, detect_speech_segments  # noqa: E402
-from premiere_cli import cmd_eval_jsx, cmd_import_into_premiere, cmd_inspect_sequence, cmd_status  # noqa: E402
+from build_premiere_sequence import (  # noqa: E402
+    build_sequence_xml,
+    detect_speech_segments,
+    execute_live_step_by_step_in_premiere,
+)
+from premiere_cli import call_cep_bridge, cmd_eval_jsx, cmd_import_into_premiere, cmd_inspect_sequence, cmd_status  # noqa: E402
 
 TOOLS = [
     {
@@ -110,11 +114,17 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
         elif name == "premiere_build_sequence":
             spec = json.loads(Path(arguments["spec_json_path"]).read_text(encoding="utf-8"))
             res = build_sequence_xml(spec)
-            if arguments.get("open_in_premiere", True) and res.get("outputXml"):
-                files = [res["outputXml"]]
-                if res.get("outputSrt"):
-                    files.append(res["outputSrt"])
-                res["premiere_import"] = cmd_import_into_premiere(files)
+            if arguments.get("open_in_premiere", True):
+                live_res = execute_live_step_by_step_in_premiere(spec)
+                if live_res:
+                    res["live_execution"] = live_res
+                    if res.get("outputSrt"):
+                        call_cep_bridge("/import", "POST", {"paths": [res["outputSrt"]]}, timeout=15.0)
+                elif res.get("outputXml"):
+                    files = [res["outputXml"]]
+                    if res.get("outputSrt"):
+                        files.append(res["outputSrt"])
+                    res["premiere_import"] = cmd_import_into_premiere(files)
         elif name == "premiere_execute_jsx":
             res = cmd_eval_jsx(arguments["code"])
         else:
