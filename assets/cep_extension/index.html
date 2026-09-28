@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Antigravity Premiere Bridge</title>
+  <style>
+    body { background: #18181b; color: #e4e4e7; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px; margin: 12px; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; background: #065f46; color: #6ee7b7; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div><span class="badge" id="status">Listening on 127.0.0.1:8088</span></div>
+  <p style="color:#a1a1aa;margin-top:8px;">Antigravity AI Bridge active for Adobe Premiere Pro.</p>
+  <script>
+    (function () {
+      try {
+        var http = require("http");
+        var evalExtendScript = function (script, cb) {
+          if (window.__adobe_cep__ && window.__adobe_cep__.evalScript) {
+            window.__adobe_cep__.evalScript(script, function (res) { cb(res); });
+          } else {
+            cb(JSON.stringify({ status: "error", message: "__adobe_cep__ not available" }));
+          }
+        };
+
+        var server = http.createServer(function (req, res) {
+          res.setHeader("Content-Type", "application/json");
+          if (req.method === "GET" && req.url === "/ping") {
+            evalExtendScript("pproPing()", function (out) {
+              res.end(out || '{"status":"error"}');
+            });
+            return;
+          }
+          if (req.method === "GET" && req.url === "/inspect-sequence") {
+            evalExtendScript("pproInspectActiveSequence()", function (out) {
+              res.end(out || '{"status":"error"}');
+            });
+            return;
+          }
+          if (req.method === "POST") {
+            var body = "";
+            req.on("data", function (chunk) { body += chunk; });
+            req.on("end", function () {
+              try {
+                var payload = JSON.parse(body || "{}");
+                if (req.url === "/eval") {
+                  evalExtendScript(payload.code || "pproPing()", function (out) {
+                    res.end(out ? (out.charAt(0) === "{" ? out : JSON.stringify({ status: "success", result: out })) : '{"status":"success"}');
+                  });
+                } else if (req.url === "/import") {
+                  var argStr = JSON.stringify(JSON.stringify(payload.paths || []));
+                  evalExtendScript("pproImportXmlOrFiles(" + argStr + ")", function (out) {
+                    res.end(out || '{"status":"success"}');
+                  });
+                } else {
+                  res.end('{"status":"error","message":"Unknown endpoint"}');
+                }
+              } catch (err) {
+                res.end(JSON.stringify({ status: "error", message: String(err) }));
+              }
+            });
+            return;
+          }
+          res.end('{"status":"ok"}');
+        });
+
+        server.listen(8088, "127.0.0.1");
+      } catch (e) {
+        document.getElementById("status").textContent = "Bridge error: " + String(e);
+      }
+    })();
+  </script>
+</body>
+</html>
