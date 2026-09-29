@@ -160,3 +160,28 @@ python3 <SKILL_DIR>/scripts/build_premiere_sequence.py build ./output/timeline_s
 1. Verify that `build_premiere_sequence.py` outputs `"status": "success"` with zero missing file paths.
 2. If the live CEP bridge (`127.0.0.1:8088`) is active, call `premiere_cli.py inspect-sequence` (or `premiere_inspect_sequence`) to verify the imported sequence's track count, total runtime, and Average Shot Length against `.editing-dna/editing_dna.json`.
 3. Deliver the open Premiere Pro timeline, the `.xml` sequence file, and the synchronized `.srt` caption file to the user.
+
+---
+
+## Embedded Laya Decision Gate (`NandhaKishorM/laya`) — Call Laya ONLY When Necessary
+
+This skill embeds the **[Laya Non-Autoregressive Decision Model (`https://github.com/NandhaKishorM/laya`)](https://github.com/NandhaKishorM/laya)** inside [`scripts/laya_decision_gate.py`](scripts/laya_decision_gate.py) (`from laya import Router`).
+
+### Strict Execution Policy: When to Call Laya vs. Manual Execution
+
+1. **BASIC / EXPLICIT TASKS → DO NOT CALL LAYA (Execute Directly & Manually)**:
+   - If the user gives a clear, direct, or single-step command (for example: *"add a marker at 12.5 seconds"*, *"cut silence shorter than 0.4s"*, *"place clip on V1 at 0s"*, *"set audio ducking to -18dB"*), **DO NOT call Laya**.
+   - Execute the step directly using the skill's native CLI/MCP tools to keep execution instant and zero-overhead.
+2. **COMPLEX / AMBIGUOUS MULTI-BRANCH TASKS → CALL LAYA (`laya_decision_gate.py`)**:
+   - Call Laya **only when** a genuine typed decision (`choice`, `score`, `noul`) across multiple creative lanes or ambiguous requirements is needed (for example: *Triage a multi-topic transcript into Hook, Core Story, and Cut segments with pacing & B-roll strategy*; *Choose the optimal narrative rhythm and transition density for an ambiguous multi-clip brief*).
+   - Run the Laya Decision Gate:
+     ```bash
+     python3 scripts/laya_decision_gate.py --state "<user_brief_or_complex_state>"
+     ```
+   - `laya_decision_gate.py` automatically runs `should_call_laya()` first:
+     - If the task is basic, it immediately returns `"laya_called": false, "execution_mode": "direct_manual_execution"` without loading neural weights.
+     - If the task is genuinely complex, it invokes `laya.Router().predict(...)` in a single forward pass (~33ms) with calibrated confidence gating (`min_confidence=0.55`) and neutral `noul` labels (`{"true": "A", "false": "B"}`).
+   - To install the `laya` neural weights package (`pip install laya`) on a machine:
+     ```bash
+     python3 scripts/laya_decision_gate.py --install
+     ```

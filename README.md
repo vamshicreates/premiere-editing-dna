@@ -69,3 +69,12 @@ git clone https://github.com/vamshicreates/premiere-editing-dna.git .agents/skil
 2. **Generate Any Future Edit from Raw Footage + Brief**:
    Once `.editing-dna/editing_dna.json` is cached:
    > **"Using our Editing DNA, auto-cut `./raw-footage/aroll.mp4`, layer the B-roll and BGM, and open the full multi-track timeline in Premiere Pro."**
+
+---
+
+## What's New in v1.1.0 — Embedded Laya Decision Gate (`NandhaKishorM/laya`)
+
+This skill now embeds **[Laya (`https://github.com/NandhaKishorM/laya`)](https://github.com/NandhaKishorM/laya)** via `scripts/laya_decision_gate.py` with a **Strict Complexity Gate**:
+
+- **Basic Tasks → Direct Manual Execution (Laya Bypassed)**: Simple, explicit commands (*"add a marker at 12.5 seconds"*, *"cut silence shorter than 0.4s"*, *"place clip on V1 at 0s"*, *"set audio ducking to -18dB"*) bypass Laya completely (`laya_called: false`) and run directly in Adobe Premiere Pro with zero model overhead.
+- **Complex / Ambiguous Creative Briefs → Laya System-1 Router (`from laya import Router`)**: Only when a task requires multi-branch creative routing (`choice`, `score`, `noul`), `scripts/laya_decision_gate.py` invokes Laya's non-autoregressive `Router` in a single forward pass.

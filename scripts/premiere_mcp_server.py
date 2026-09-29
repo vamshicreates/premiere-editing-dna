@@ -21,7 +21,10 @@ from build_premiere_sequence import (  # noqa: E402
 )
 from premiere_cli import call_cep_bridge, cmd_eval_jsx, cmd_import_into_premiere, cmd_inspect_sequence, cmd_status  # noqa: E402
 
+from laya_decision_gate import evaluate_decision as _laya_eval  # noqa: E402
+
 TOOLS = [
+    {'name': 'premiere_laya_decide', 'description': 'Evaluate a creative brief or decision for Adobe Premiere Pro using the embedded Laya model (https://github.com/NandhaKishorM/laya) with strict complexity gating. CALL ONLY WHEN NECESSARY for complex/ambiguous multi-branch tasks; for basic tasks, execute directly without calling Laya.', 'inputSchema': {'type': 'object', 'properties': {'state': {'type': 'string', 'description': 'The complex user brief or decision state to evaluate.'}, 'force_laya': {'type': 'boolean', 'description': 'Optional override to force Laya Router evaluation (default: false).'}}, 'required': ['state']}},
     {
         "name": "premiere_status",
         "description": "Check Adobe Premiere Pro installation and live CEP bridge status on macOS or Windows.",
@@ -86,6 +89,12 @@ TOOLS = [
 
 def handle_tool_call(name: str, arguments: dict) -> dict:
     try:
+        if name == "premiere_laya_decide":
+            res = _laya_eval(
+                state_text=arguments.get("state", ""),
+                force_laya=bool(arguments.get("force_laya", False)),
+            )
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2)}]}
         if name == "premiere_status":
             res = cmd_status()
         elif name == "premiere_inspect_sequence":
@@ -155,7 +164,7 @@ def main():
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "premiere-editing-dna", "version": "1.0.0"},
+                    "serverInfo": {"name": "premiere-editing-dna", "version": "1.1.0"},
                 },
             }
             sys.stdout.write(json.dumps(resp) + "\n")
